@@ -1,0 +1,1177 @@
+#include "AsyncTaskLib.h"
+#include <LiquidCrystal.h>
+#include <Keypad.h>
+#include <EEPROM.h>
+#include <RotaryEncoder.h>
+
+#define DEBUG(a) Serial.print(millis()); Serial.print(": "); Serial.println(a); // definicion del serial debug
+
+// definicion de umbrales de sensores
+byte umb_temp_alta = 30;
+byte umb_temp_baja = 18;
+byte umb_temp_alarma  = 40;
+int umb_luz = 34;
+int umb_sonido = 34;
+// definicion de umbrales de sensores default
+byte def_umb_temp_alta = 30;
+byte def_umb_temp_baja = 18;
+byte def_umb_temp_alarma  = 40;
+int def_umb_luz = 34;
+int def_umb_sonido = 34;
+
+
+//variables keypad
+const byte ROWS = 4; //four rows
+const byte COLS = 3; //three columns
+char keys[ROWS][COLS] = {
+  {'1', '2', '3'},
+  {'4', '5', '6'},
+  {'7', '8', '9'},
+  {'*', '0', '#'}
+};
+byte rowPins[ROWS] = {13, 10, 9, 8}; //connect to the row pinouts of the keypad
+byte colPins[COLS] = {7, 6, 5}; //connect to the column pinouts of the keypad
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+
+//variables contrase�a
+char clave[4] = {'2', '2', '5', '5'}; // Aqui va la clave, Para cambiar el tama�o de la clave se debe modificar el array
+int posicion = 0;  // necesaria para contar los dijitos de la clave
+int cursor = 0;    // posicion inicial de la clave en el LCD
+int intentos = 0;   //para contar las veces de clave incorrecta
+void press_key(char key);
+bool f_clave_correcta = false;
+
+//declaraciones de auxiliares
+bool f_mensaje_ini_bloq = true;
+bool f_mensaje_ini_conf = true;
+bool f_eprom_run = true;
+void mostrar_main_menu();
+unsigned long tiempo = 0;
+byte pos_memoria = 0;
+
+
+// pines para LCD
+const int rs = 12, en = 11, d4 = 31, d5 = 32, d6 = 33, d7 = 34;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// definicion de los pines para el LEDrgb
+int ledRojo = A5;  // pin para el LED rojo * cambiar pines del led a pwm para rgb completo en analogo
+int ledVerde =  A6; // pin para el LED verde
+int ledAzul = A4;  // pin para el LED azul
+
+//pines para el encoder
+#define clkPin 2
+#define dtPin 3
+#define swPin 26
+int encoderVal = 0;
+int valor_encoder();
+RotaryEncoder encoder(clkPin, dtPin, RotaryEncoder::LatchMode::TWO03);
+
+
+// Variables para el sensor de luz
+#define pin_photo A0
+int photo_value = 0;
+void read_photoresistor(void);
+
+
+
+// VAriables para el sensor de temperatura
+#define pin_temp A1
+#define beta 4090
+#define resistance 10
+float temp_value = 0.0;
+float temperatura = 0.0;
+void read_temperature(void);
+int max_temp = 50;
+int min_temp = 0;
+
+// Variables para el sensor de sonido
+#define pin_sound A2
+int sound_value = 0;
+void read_sound(void);
+
+//variables para el control del buzzer analogico
+#define pin_buzz 4
+#define NOTE_B6  1976
+#define NOTE_C7  2093
+#define NOTE_CS7 2217
+#define NOTE_D7  2349
+int duraciones[] = { 8, 8, 4, 4 };    // array con la duracion de cada nota
+int melodia[] = { NOTE_B6, NOTE_C7, NOTE_CS7, NOTE_D7 };//// array con las notasa a reproducir
+
+// Definiciones de las tareas asincronas
+AsyncTask asyncTaskTemp(2000, true, read_temperature);
+AsyncTask asyncTaskPhoto(1000, true, read_photoresistor);
+AsyncTask asyncTasksound(100, true, read_sound);
+
+
+
+
+// enumerador de los estados finitos
+enum estado
+{
+  estado_bloq,// sistema bloqueado
+  estado_conf,// estado de configuracion
+  estado_Run,//Donde suceden los hechos
+  estado_alarm// estado de alarma
+};
+
+estado currentState; // Variable global para control de estados
+
+void read_photoresistor()// Funcion encargada de leer y procesar la informacion del sensor de luz
+{
+  photo_value = analogRead(pin_photo);// se lee en el pin analogo de el sensor
+  
+}
+
+void read_temperature()// Funcion encargada de leer y procesar la informacion del sensor de temperatura
+{
+  // se usa la sigiente formula para convertir la informacion dada por el sensor en grados centigrados
+  long a = 1023 - analogRead(pin_temp);
+  temperatura =  1 / (log(1 / (1023. / a - 1)) / beta + 1.0 / 298.15) - 273.15;
+  //beta / (log((1025.0 * 10 / a - 10) / 10) + beta / 298.0) - 273.0;
+   
+                
+  lcd.setCursor(0, 1);
+  lcd.print("temp:");
+  lcd.print(temperatura); // se muestra en pantalla la temperatura dada por la convercion del valor del sensor
+}
+
+void read_sound()// Funcion encargada de leer y procesar la informacion del sensor de sonido
+{
+  sound_value = analogRead(pin_sound);// se lee en el pin analogo de el sensor
+  lcd.setCursor(0, 0);
+   lcd.print("S:");
+   lcd.print(sound_value); // se muestra en pantalla el valor arrojado por el sensor
+}
+
+int valor_encoder()// acumula y reinicia el valor del encoder
+{
+  int change = giro_encoder();
+  encoderVal = encoderVal + change;
+  Serial.println(encoderVal);
+  return (encoderVal);
+}
+
+int giro_encoder(void)// obtiene el valor del giro del encoder
+{
+  static int oldA = HIGH;
+  static int oldB = HIGH;
+  int result = 0;
+  int newA = digitalRead(clkPin);
+  int newB = digitalRead(dtPin);
+  if (newA != oldA || newB != oldB)
+  {
+    // something has changed
+    if (oldA == HIGH && newA == LOW)
+    {
+      result = (oldB * 2 - 1);
+    }
+  }
+  oldA = newA;
+  oldB = newB;
+  return result;
+}
+
+
+void setup()
+{
+  //se inicializan los pines del Encoder como entradas
+  pinMode(clkPin, INPUT);
+  pinMode(dtPin, INPUT);
+  pinMode(swPin, INPUT);
+  digitalWrite(swPin, HIGH);
+  //se inicializan los pines del led  y buzzer como salidas
+  //leds
+  pinMode(ledRojo, OUTPUT);
+  pinMode(ledVerde, OUTPUT);
+  pinMode(ledAzul, OUTPUT);
+  //buzzer
+  pinMode(pin_buzz, OUTPUT);
+
+  Serial.begin(9600);
+  Serial.println("inicio");// se inicia el serial para debug
+
+  // inicializacion del lcd
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  // inicializacion de las tareas asincronas
+  asyncTaskTemp.Start();
+  asyncTaskPhoto.Start();
+  asyncTasksound.Start();
+ //EEPROM.put(5, 50);
+  currentState =  estado::estado_bloq; // se inicializa la maquina en estado inicial
+}
+
+void loop()
+{
+
+  actualizar_estado(); // actualiza la maquina de estados segun la entrada de temperatura
+
+
+
+}
+
+
+void actualizar_estado() // se hace la seleccion de funciones a realizar segun el estado actual
+{
+  switch (currentState)
+  {
+    case estado::estado_bloq: funcion_bloq();   break;
+    case estado::estado_conf: funcion_conf();   break;
+    case estado::estado_Run: funcion_run();   break;
+    case estado::estado_alarm: funcion_alarma();   break;
+    default: break;
+  }
+}
+
+void funcion_run() {// funcion para el estado de bloqueo
+  Serial.println(" maquina en estado run"); // se imprime en el debug el estado actual
+ // inicializacion de las tareas asincronas
+ 
+
+
+  if (f_eprom_run) { //si es la primera vez del ingrso a run, se lee los umbrales desde Eprom
+    leer_Eprom();
+    f_eprom_run = false;
+     // inicializacion de las tareas asincronas
+  
+  }
+    // se actualizan las tareas asincronas
+  asyncTaskTemp.Update();
+  asyncTaskPhoto.Update();
+  asyncTasksound.Update();
+
+  digitalWrite(swPin, HIGH);// se hace el senso del swich del encoder por 3 segundos para salir de run a configuracion
+
+  if (digitalRead(swPin) == LOW)
+  {
+    digitalWrite(swPin, HIGH);
+
+    tiempo = millis();
+    while (millis() < tiempo + 3000UL) {
+    }
+
+    if (digitalRead(swPin) == LOW)
+    {
+      salir_de_run();
+    }
+  }
+
+
+
+
+  if (photo_value <  umb_luz) {// muestra un mensaje en pantalla si se supera el umbral de luz
+    tiempo = millis();
+    while (millis() < tiempo + 300UL) {
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("hum sensor luz ");
+    tiempo = millis();
+    while (millis() < tiempo + 800UL) {
+    }
+  }
+  Serial.println(umb_sonido);
+
+  if (sound_value >  umb_sonido) {// muestra un mensaje en pantalla si se supera el umbral de sonido
+    tiempo = millis();
+    while (millis() < tiempo + 300UL) {
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("hum sensor sound ");
+    tiempo = millis();
+    while (millis() < tiempo + 800UL) {
+    }
+  }
+
+  // seleccion de funciones segun temperatura
+  if (temperatura <= umb_temp_baja) {
+    funcion_temp_baja();
+  }
+  if (temperatura > umb_temp_baja && temperatura <= umb_temp_alta ) {
+    funcion_temp_normal();
+  }
+  if (temperatura > umb_temp_alta && temperatura < umb_temp_alarma ) {
+    funcion_temp_alta();
+  }
+  if (temperatura >= umb_temp_alarma  ) {
+    funcion_alarma();
+  }
+
+}
+void salir_de_run() {// funcion para salir de estado run a configuracion
+  currentState = estado::estado_conf; // se establece la maquina en estado conf
+  // se reinician variables y se detienen las tareas asincronas de los sensores
+  f_eprom_run = true;
+  lcd.clear();
+  digitalWrite(swPin, HIGH);
+  /*asyncTaskTemp.Stop();
+  asyncTaskPhoto.Stop();
+  asyncTasksound.Stop();
+  temperatura = 22;
+  */
+  
+}
+
+void funcion_bloq() {// funcion para el estado de bloqueo
+  Serial.println(" maquina en estado bloq"); // se imprime en el debug el estado actual
+
+  if (f_mensaje_ini_bloq) {
+    mensaje_inicial_bloq();
+    f_mensaje_ini_bloq = false;
+  }
+  char key = keypad.getKey();
+  if (key) {
+    press_key(key);
+  }
+  if (f_clave_correcta) {
+    currentState = estado::estado_conf;
+    f_mensaje_ini_bloq = true;
+    f_clave_correcta = false;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+  }
+}
+
+void funcion_conf() {// funcion para el estado de configuracion
+
+
+  Serial.println(" maquina en estado conf");
+
+ if (f_mensaje_ini_conf) {
+      menu_part_1();
+   f_mensaje_ini_conf = false;
+  }
+  char key = keypad.getKey();
+  if (key) {
+    //asyncTaskMainMenu.Stop();
+    //      asyncTaskMainMenu.end();
+    //     asyncTaskMainMenu.Finish();
+    funciones_main_menu(key);
+  }
+  //asyncTaskMainMenu.Start();
+
+
+
+}
+void menu_part_1(){
+
+ lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("1.Umb Tmp High");
+  lcd.setCursor(0, 1);
+  lcd.print("2.Umb Tmp Low");
+  bool temp_while = true;
+  // char key = keypad.getKey();
+
+ while (temp_while) {
+    char key = keypad.getKey();
+ if (key) {
+
+   if(key=='*'){
+    menu_part_2();    //-------- menu derecha
+    temp_while = false;
+   }
+   else if(key=='#'){
+    menu_part_1();    //-------- menu izquierda
+    temp_while = false;
+   }
+    //asyncTaskMainMenu.Stop();
+    //      asyncTaskMainMenu.end();
+    //     asyncTaskMainMenu.Finish();
+    funciones_main_menu(key);
+    temp_while = false;
+  }
+
+  }
+
+}
+void menu_part_2(){
+   lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("3.Umb Tmp Alarm");
+  lcd.setCursor(0, 1);
+  lcd.print("4.Umb ligth");
+  bool temp_while = true;
+
+ while (temp_while) {
+   char key = keypad.getKey();
+ if (key) {
+   if(key=='*'){
+    menu_part_3();    //-------- menu derecha
+    temp_while = false;
+   }
+   else if(key=='#'){
+    menu_part_1();    //-------- menu izquierda
+    temp_while = false;
+   }
+    //asyncTaskMainMenu.Stop();
+    //      asyncTaskMainMenu.end();
+    //     asyncTaskMainMenu.Finish();
+    funciones_main_menu(key);
+    temp_while = false;
+  }
+
+  }
+
+
+}
+void menu_part_3(){
+    lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("5.Umb sound");
+  lcd.setCursor(0, 1);
+  lcd.print("6.Salir");
+  bool temp_while = true;
+
+ while (temp_while) {
+   char key = keypad.getKey();
+ if (key) {
+   if(key=='*'){
+    menu_part_4();    //-------- menu derecha
+    temp_while = false;
+   }
+   else if(key=='#'){
+    menu_part_2();    //-------- menu izquierda
+    temp_while = false;
+   }
+    //asyncTaskMainMenu.Stop();
+    //      asyncTaskMainMenu.end();
+    //     asyncTaskMainMenu.Finish();
+    funciones_main_menu(key);
+    temp_while = false;
+  }
+
+  }
+
+}
+void menu_part_4(){
+       lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("7.BLOQUEAR");
+  lcd.setCursor(0, 1);
+  lcd.print("8.reset");
+  bool temp_while = true;
+
+ while (temp_while) {
+   char key = keypad.getKey();
+ if (key) {
+   if(key=='*'){
+    menu_part_4();    //-------- menu derecha
+    temp_while = false;
+   }
+   else if(key=='#'){
+    menu_part_3();    //-------- menu izquierda
+    temp_while = false;
+   }
+    //asyncTaskMainMenu.Stop();
+    //      asyncTaskMainMenu.end();
+    //     asyncTaskMainMenu.Finish();
+    funciones_main_menu(key);
+    temp_while = false;
+  }
+
+  }
+
+}
+
+void conf_temp_alta() {// funcion que establese el umbral de temperatura alta
+  pos_memoria = 0;
+  byte temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_alta = temp_mem;
+
+  }
+  char key = keypad.getKey();
+  bool temp_while = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UMB TEMP HIGH");
+  int temp_encoder = 0;
+  int temp_encoder2 = 0;
+
+  while (temp_while) {
+    static int pos = 0;
+    encoder.tick();
+
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+
+      Serial.println(newPos);
+      temp_encoder2 = newPos;
+      pos = newPos;
+    }
+    if (temp_encoder2 > temp_encoder) {
+      umb_temp_alta = umb_temp_alta + 1;
+      temp_encoder = temp_encoder2;
+    }
+    if (temp_encoder2 < temp_encoder) {
+      umb_temp_alta = umb_temp_alta - 1;
+      temp_encoder = temp_encoder2;
+    }
+    key = keypad.getKey();
+    lcd.setCursor(0, 1);
+    lcd.print("    ");
+    lcd.setCursor(0, 1);
+    lcd.print(umb_temp_alta);
+    tiempo = millis();
+  while (millis() < tiempo + 10UL) {// crea un retardo para la correcta visualizacion
+  }
+
+    if (key == '0') {
+      if (umb_temp_alta > umb_temp_baja && umb_temp_alta < umb_temp_alarma && umb_temp_alta < max_temp && umb_temp_alta > min_temp) {
+        temp_while = false;
+
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("temp incorrecta");
+        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+      }
+
+    }
+  }
+  EEPROM.update(pos_memoria, umb_temp_alta);
+  f_mensaje_ini_conf = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  funcion_conf;
+}
+
+void conf_temp_baja() {// funcion que establese el umbral de temperatura baja
+  pos_memoria = 1;
+  byte temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_baja = temp_mem;
+
+  }
+  //encoderVal=5;
+  char key = keypad.getKey();
+  bool temp_while = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UMB TEMP LOW");
+  int temp_encoder = 0;
+  int temp_encoder2 = 0;
+
+  while (temp_while) {
+    static int pos = 0;
+    encoder.tick();
+
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+
+      Serial.println(newPos);
+      temp_encoder2 = newPos;
+      pos = newPos;
+    }
+    if (temp_encoder2 > temp_encoder) {
+      umb_temp_baja = umb_temp_baja + 1;
+      temp_encoder = temp_encoder2;
+    }
+    if (temp_encoder2 < temp_encoder) {
+      umb_temp_baja = umb_temp_baja - 1;
+      temp_encoder = temp_encoder2;
+    }
+    key = keypad.getKey();
+    lcd.setCursor(0, 1);
+    lcd.print("    ");
+    lcd.setCursor(0, 1);
+    lcd.print(umb_temp_baja);
+      tiempo = millis();
+  while (millis() < tiempo + 10UL) {// crea un retardo para la correcta visualizacion
+  }
+
+    if (key == '0') {
+      if (umb_temp_baja < umb_temp_alta && umb_temp_baja < umb_temp_alarma && umb_temp_baja < max_temp && umb_temp_baja > min_temp) {
+        temp_while = false;
+
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("temp incorrecta");
+        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+      }
+
+    }
+  }
+  EEPROM.update(pos_memoria, umb_temp_baja);
+  f_mensaje_ini_bloq = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  funciones_main_menu;
+}
+void conf_temp_alarma() {// funcion que establese el umbral de temperatura de alarma
+  pos_memoria = 2;
+  byte temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_alarma = temp_mem;
+
+  }
+  //encoderVal=5;
+  char key = keypad.getKey();
+  bool temp_while = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UMB TEMP ALARM");
+
+  int temp_encoder = 0;
+  int temp_encoder2 = 0;
+
+  while (temp_while) {
+    static int pos = 0;
+    encoder.tick();
+
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+
+      Serial.println(newPos);
+      temp_encoder2 = newPos;
+      pos = newPos;
+    }
+    if (temp_encoder2 > temp_encoder) {
+      umb_temp_alarma = umb_temp_alarma + 1;
+      temp_encoder = temp_encoder2;
+    }
+    if (temp_encoder2 < temp_encoder) {
+      umb_temp_alarma = umb_temp_alarma - 1;
+      temp_encoder = temp_encoder2;
+    }
+    key = keypad.getKey();
+    lcd.setCursor(0, 1);
+    lcd.print("    ");
+    lcd.setCursor(0, 1);
+    lcd.print(umb_temp_alarma);
+      tiempo = millis();
+  while (millis() < tiempo + 10UL) {// crea un retardo para la correcta visualizacion
+  }
+
+    if (key == '0') {
+      if (umb_temp_alarma > umb_temp_alta && umb_temp_alarma > umb_temp_baja && umb_temp_alarma < max_temp && umb_temp_alarma > min_temp) {
+        temp_while = false;
+
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("temp incorrecta");
+        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+      }
+
+    }
+  }
+  EEPROM.update(pos_memoria, umb_temp_alarma);
+  f_mensaje_ini_conf = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+
+}
+void conf_umb_luz() {// funcion que establese el umbral de luz
+  pos_memoria = 3;
+  int temp_mem;
+  EEPROM.get(pos_memoria, temp_mem);
+  if (temp_mem != NULL) {
+    umb_luz = temp_mem;
+
+  }
+  //encoderVal=5;
+  char key = keypad.getKey();
+  bool temp_while = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UMB LIGHT");
+
+  int temp_encoder = 0;
+  int temp_encoder2 = 0;
+
+  while (temp_while) {
+    static int pos = 0;
+    encoder.tick();
+
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+
+      Serial.println(newPos);
+      temp_encoder2 = newPos;
+      pos = newPos;
+    }
+    if (temp_encoder2 > temp_encoder) {
+      umb_luz = umb_luz + 1;
+      temp_encoder = temp_encoder2;
+    }
+    if (temp_encoder2 < temp_encoder) {
+      umb_luz = umb_luz - 1;
+      temp_encoder = temp_encoder2;
+    }
+    key = keypad.getKey();
+    lcd.setCursor(0, 1);
+    lcd.print("    ");
+    lcd.setCursor(0, 1);
+    lcd.print(umb_luz);
+      tiempo = millis();
+  while (millis() < tiempo + 10UL) {// crea un retardo para la correcta visualizacion
+  }
+
+    if (key == '0') {
+      if (umb_luz < 1023 && umb_luz > 0) {
+        temp_while = false;
+
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("UMB incorrecto");
+        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+      }
+
+    }
+  }
+  EEPROM.put(pos_memoria, umb_luz);
+  f_mensaje_ini_conf = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+}
+void conf_umb_sonido() {// funcion que establese el umbral de sonido
+
+  pos_memoria = 5;
+  int temp_mem;
+  EEPROM.get(pos_memoria, temp_mem);
+  if (temp_mem != NULL) {
+    umb_sonido = temp_mem;
+
+  }
+  //encoderVal=5;
+  char key = keypad.getKey();
+  bool temp_while = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UMB SOUND");
+
+
+  int temp_encoder = 0;
+  int temp_encoder2 = 0;
+
+  while (temp_while) {
+    static int pos = 0;
+    encoder.tick();
+
+    int newPos = encoder.getPosition();
+    if (pos != newPos) {
+
+      Serial.println(newPos);
+      temp_encoder2 = newPos;
+      pos = newPos;
+    }
+    if (temp_encoder2 > temp_encoder) {
+      umb_sonido = umb_sonido + 1;
+      temp_encoder = temp_encoder2;
+    }
+    if (temp_encoder2 < temp_encoder) {
+      umb_sonido = umb_sonido - 1;
+      temp_encoder = temp_encoder2;
+    }
+    key = keypad.getKey();
+    lcd.setCursor(0, 1);
+    lcd.print("    ");
+    lcd.setCursor(0, 1);
+    lcd.print(umb_sonido);
+      tiempo = millis();
+  while (millis() < tiempo + 10UL) {// crea un retardo para la correcta visualizacion
+  }
+
+    if (key == '0') {
+      if (umb_sonido < 1023 && umb_sonido > 0) {
+        temp_while = false;
+
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("UMB incorrecto");
+        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+      }
+
+    }
+  }
+  EEPROM.put(pos_memoria, umb_sonido);
+  f_mensaje_ini_conf = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+}
+void conf_salir() {// establece la salida de el estado de configuracion al estado run
+
+  currentState = estado::estado_Run;
+  f_mensaje_ini_conf = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+}
+
+void leer_Eprom() {// lee los valores de los umbrales almacenados en la memoria
+  // se establese los indices de memoria de la siguente manera
+  // 0 umb_temp_alta
+  // 1 umb_temp_baja
+  // 2 umb_temp_alarma
+  // 3,4 umb_luz    // se asgnan 2 bytes por ser enteros
+  // 5,6 umb_sonido
+
+  pos_memoria = 0;
+  int temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_alta = temp_mem;
+  }
+  pos_memoria = 1;
+  temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_baja = temp_mem;
+  }
+  pos_memoria = 2;
+  temp_mem = EEPROM.read(pos_memoria);
+  if (temp_mem != NULL) {
+    umb_temp_alarma = temp_mem;
+  }
+  pos_memoria = 3;
+  EEPROM.get(pos_memoria, temp_mem);
+  if (temp_mem != NULL) {
+    umb_luz = temp_mem;
+  }
+  pos_memoria = 5;
+  EEPROM.get(pos_memoria, temp_mem);
+  if (temp_mem != NULL) {
+    umb_sonido = temp_mem;
+  }
+}
+
+void funciones_main_menu(char key) {// hace la seleccion correspondiente al numero dijitado en estado de configuracion
+
+  switch (key)
+  {
+    case '1': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 1 ");
+        delay(1000);
+        conf_temp_alta();
+      };   break;
+    case '2': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 2 ");
+        delay(1000);
+        conf_temp_baja();
+      };   break;
+    case '3': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 3 ");
+        delay(1000);
+        conf_temp_alarma();
+      };   break;
+    case '4': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 4 ");
+        delay(1000);
+        conf_umb_luz();
+      };   break;
+    case '5': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 5 ");
+        delay(1000);
+        conf_umb_sonido();
+      };   break;
+    case '6': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 6 ");
+        delay(1000);
+        conf_salir();
+      };   break;
+    case '7': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 7 ");
+        delay(1000);
+        bloquear_sistema();
+      };   break;
+      case '8': {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("opcion 8 ");
+        delay(1000);
+        reset_valores();
+      };   break;
+    default: break;
+  }
+}
+void reset_valores(){
+   pos_memoria =0;
+   EEPROM.update(pos_memoria, def_umb_temp_alta);
+    pos_memoria =1;
+   EEPROM.update(pos_memoria, def_umb_temp_baja);
+    pos_memoria =2;
+   EEPROM.update(pos_memoria, def_umb_temp_alarma);
+    pos_memoria =3;
+   EEPROM.update(pos_memoria, def_umb_luz);
+    pos_memoria =5;
+   EEPROM.update(pos_memoria, def_umb_sonido);
+   lcd.setCursor(0, 1);
+        lcd.print("reset defaul");
+        delay(2000);
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+        f_mensaje_ini_conf = true;
+  encoderVal = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  }
+void bloquear_sistema() { //funcion encargada de volcer al estado de bloqueo
+  currentState = estado::estado_bloq;
+  f_mensaje_ini_conf = true;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+}
+
+void funcion_temp_baja() { // funciones de maquina en estado Run con temperatura baja
+  Serial.println(" maquina en estado run temp baja"); // se imprime en el debug el estado actual
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, HIGH);
+  digitalWrite(ledVerde, LOW); // led en azul
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("temp:");
+  lcd.print(temperatura); // se muestra en pantalla la temperatura dada por la convercion del valor del sensor
+  lcd.setCursor(0, 1);
+  lcd.print("ph:");
+  lcd.print(photo_value);
+  lcd.setCursor(7, 1);
+  lcd.print("s:");
+  lcd.print(sound_value);
+  lcd.setCursor(12, 0);
+  lcd.print("A");// se imprime en pantalla el indicador de estado
+  tiempo = millis();
+  while (millis() < tiempo + 4000) {// crea un retardo para la correcta visualizacion
+  }
+
+
+}
+
+void funcion_temp_normal() { // funciones de maquina en estado Run con temperatura normal
+  Serial.println(" maquina en estado run temp normal"); // se imprime en el debug el estado actual
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, HIGH); // led en azul
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("temp:");
+  lcd.print(temperatura); // se muestra en pantalla la temperatura dada por la convercion del valor del sensor
+  lcd.setCursor(0, 1);
+  lcd.print("photo:");
+  lcd.print(photo_value);
+  lcd.setCursor(7, 1);
+  lcd.print("s:");
+  lcd.print(sound_value);
+  lcd.setCursor(12, 0);
+  lcd.print("B"); // se imprime en pantalla el indicador de estado
+  tiempo = millis();
+  while (millis() < tiempo + 4000) {// crea un retardo para la correcta visualizacion
+  }
+}
+
+void funcion_temp_alta() { // funciones de maquina en estado Run con temperatura alta
+  Serial.println(" maquina en estado run temp alta"); // se imprime en el debug el estado actual
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW); // led en azul
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("temp:");
+  lcd.print(temperatura); // se muestra en pantalla la temperatura dada por la convercion del valor del sensor
+  lcd.setCursor(0, 1);
+  lcd.print("photo:");
+  lcd.print(photo_value);
+  lcd.setCursor(7, 1);
+  lcd.print("s:");
+  lcd.print(sound_value);
+  lcd.setCursor(12, 0);
+  tiempo = millis();
+  while (millis() < tiempo + 4000) {// crea un retardo para la correcta visualizacion
+  }
+}
+
+void funcion_alarma() { // funciones de maquina en estado run con temperatura de alarma
+
+  Serial.println(" maquina en estado run alarma"); // se imprime en el debug el estado actual
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, HIGH);
+  digitalWrite(ledVerde, LOW); // led en azul
+  delay(200);
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW); // led rojo
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("temp:");
+  lcd.print(temperatura); // se muestra en pantalla la temperatura dada por la convercion del valor del sensor
+  lcd.setCursor(12, 0);
+  lcd.print("D"); // se imprime en pantalla el indicador de estado
+  lcd.setCursor(0, 1);
+  lcd.print("ALARMA");
+  sonar_buzz(); // se hace sonar el buzzer en se�al de alarma
+  secuencia_led(); // se muestra una secuencia de led en rojo y azul en se�al de alarma
+  tiempo = millis(); // se da tiempo de espera de alarma
+  while (millis() < tiempo + 4000) {// crea un retardo para la correcta visualizacion
+  }
+  salir_de_run();// salir de estado run a configuracion
+}
+
+
+
+void sonar_buzz() { // funcion encargada de hacer sonar el buzzer
+  for (int i = 0; i < 3; i++) {      // bucle repite 4 veces, 1 por cada nota
+    int duracion = 1000 / duraciones[i];    // duracion de la nota en milisegundos
+    tone(pin_buzz, melodia[i], duracion);  // ejecuta el tono con la duracion
+    int pausa = duracion * 1.30;      // calcula pausa
+    delay(pausa);         // demora con valor de pausa
+    noTone(pin_buzz);        // detiene reproduccion de tono
+  }
+}
+
+void secuencia_led() { //secuencia de led intercalada en azul y rojo
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW);
+  delay(200);
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, HIGH);
+  digitalWrite(ledVerde, LOW);
+  delay(200);
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW);
+  delay(200);
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, HIGH);
+  digitalWrite(ledVerde, LOW);
+  delay(200);
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW);
+}
+
+void mensaje_inicial_bloq() {// muestra el mensaje inicial del sistema
+
+  // mensaje inicial
+  lcd.setCursor(0, 0);
+  lcd.print(" SISTEMA DE");
+  lcd.setCursor(0, 1);
+  lcd.print("  SEGURIDAD !!");
+  delay(400);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Ingrese la clave");
+  lcd.setCursor(0, 1);
+}
+
+void clave_correcta() {//funcion para cuando se ingresa la clave correctamente
+
+  lcd.clear();
+  lcd.setCursor(0, 0);     // situamos el cursor el la pos 0 de la linea 0.
+  lcd.print("Clave correcta!! "); // escribimos en LCD
+  digitalWrite(ledVerde, HIGH); // encendemos el verde
+  delay(1000);
+  lcd.clear();
+  lcd.setCursor(0, 0);     // situamos el cursor el la pos 0 de la linea 0.
+  lcd.print("bienvenido!");
+  secuencia_led();
+  f_clave_correcta = true;
+  posicion = 0;
+  intentos = 0;
+  cursor = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);     // situamos el cursor el la pos 0 de la linea 0.
+  delay(1000);
+
+
+}
+
+void clave_incorrecta() { //funcion para cuando se ingresa la clave incorrecta
+
+  cursor = 0;
+  posicion = 0;
+  intentos++;
+  lcd.setCursor(0, 1);     // situamos el cursor el la pos 0 de la linea 0.
+  lcd.print("Clave erronea!");         // escribimos en LCD
+  //led amarillo
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, HIGH);
+  delay(1000);
+  digitalWrite(ledRojo, LOW);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Ingrese la clave");
+  lcd.setCursor(0, 1);
+}
+
+void sistema_bloqueado() {// funcion que da retardo por agotar los intentos de ingrsar la clave
+  intentos = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);     // situamos el cursor el la pos 0 de la linea 0.
+  lcd.print("Clave bloqueada");         // escribimos en LCD
+  lcd.setCursor(0, 1);
+  lcd.print("Espere...");
+  //led rojo
+  digitalWrite(ledRojo, HIGH);
+  digitalWrite(ledAzul, LOW);
+  digitalWrite(ledVerde, LOW);
+  delay(2000);
+  digitalWrite(ledRojo, LOW);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Ingrese la clave");
+  lcd.setCursor(0, 1);
+}
+
+void press_key(char key) {// funcion que valida cada digito de la contrase�a
+
+
+
+  lcd.print("*");
+  cursor++;
+  if (key == clave[posicion] && cursor <= 4) {
+    posicion ++; // aumentamos posicion si es correcto el digito
+    if (posicion == 4) { // comprobamos que se han introducido los 4 correctamente
+      clave_correcta();
+    }
+  } else {
+    posicion = 0;
+  }
+  if (cursor >= 4) {
+    clave_incorrecta();
+    if (intentos == 3 ) {
+      sistema_bloqueado();
+    }
+  }
+
+}
+
+//FIN DEL PROGRAMA
